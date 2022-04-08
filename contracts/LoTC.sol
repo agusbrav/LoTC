@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
 import "./Medal.sol";
 
 /**
@@ -17,7 +18,7 @@ import "./Medal.sol";
 
 contract LordOfChain is AccessControl, ReentrancyGuard {
     using SafeMath for uint256;
-    using SafeMath for uint128;
+    using Counters for Counters.Counter;
 
     /**
      * @dev Defining constant roles for AccessControl use.
@@ -28,7 +29,7 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Defining constant roles for AccessControl use.
-     * CHAMPION role enables you once the character creation in order to 
+     * CHAMPION role enables you once the character creation in order to
      * interact with bosses / other players.
      */
     bytes32 private constant CHAMPION = keccak256("CHAMPION");
@@ -40,7 +41,7 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
         uint256 hp;
         uint256 exhausted;
         uint256 magic;
-        uint128 xp;
+        uint256 xp;
         uint8 level;
         uint8 str;
         uint8 end;
@@ -61,15 +62,18 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
         mapping(address => uint256) damage;
     }
 
+    Counters.Counter private _bossesIds;
+
     ///@notice This table needs to bee loaded manually by the owner in order to apply the current level requirements
     uint256[256] public expirienceTable;
 
     ///Mapings of bosses(invaders), characters(players) and gold of each address;
     mapping(uint256 => Boss) public invaders;
     mapping(address => Character) public players;
+    mapping(address => uint256) public statPoints;
     mapping(address => uint256) public gold;
 
-    ///NFT Contract of ERC721 Token 
+    ///NFT Contract of ERC721 Token
     Medal public medal;
     address public medalContract;
 
@@ -120,14 +124,20 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
     event MedalReceived();
 
     ///Inform boss Ids, stats and current HP remaining.
-    event BossReport();
+    event BossReport(
+        uint256 _id,
+        uint256 _hpLeft,
+        uint256 _bounty,
+        uint8 _level
+    );
 
     ///When a boss lvl30+ has been killed the champion who killed it will be assined a new role of LORD.
     event NewLordInLands();
+
     /**
-     * @dev The creation of the character set your stats randomize and initialize the structure of "Character" 
+     * @dev The creation of the character set your stats randomize and initialize the structure of "Character"
      * Only one character per address is allowed.
-     * @notice You need to pay the contract with 0.1 eth to create your character. 
+     * @notice You need to pay the contract with 0.1 eth to create your character.
      * Once created you can begin your journey to become a Lord.
      */
     function createCharacter() public payable {
@@ -145,10 +155,10 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
 
     /**
      * @dev Pseudo randomize stats. Since its only used to create bosses and characters
-     * there is no need to a real random number from oracle. 
+     * there is no need to a real random number from oracle.
      * @param _statPoints The number of points that will be randomize between a porcentage of total points.
      * @return _str The strength will calculate the damage done by the character/boss.
-     * @return _end Endurance will block a percentage of the attack done by the attacker. 
+     * @return _end Endurance will block a percentage of the attack done by the attacker.
      */
     function _randomizeStats(uint16 _statPoints)
         internal
@@ -199,7 +209,7 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
     }
 
     /**
-     * @dev Primary attack function, called by the msg.sender character. 
+     * @dev Primary attack function, called by the msg.sender character.
      * @notice This function will be the first function to interact with new players
      * If the player HP points reach 0 it will take out part of the expirience accumulated by the player
      * The character wont be leveling down but the expirience target to the next level will keep the same.
@@ -214,7 +224,9 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
         onlyRole(CHAMPION)
         nonReentrant
     {
-        (uint256 playerDamage, uint256 bossDamage) = _damageCalculation(_bossId);
+        (uint256 playerDamage, uint256 bossDamage) = _damageCalculation(
+            _bossId
+        );
         (, players[msg.sender].hp) = players[msg.sender].hp.trySub(bossDamage);
         (, invaders[_bossId].hp) = invaders[_bossId].hp.trySub(playerDamage);
         invaders[_bossId].damage[msg.sender] =
@@ -224,7 +236,8 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
             players[msg.sender].exhausted = block.timestamp + 14400;
         if (players[msg.sender].hp == 0) {
             players[msg.sender].exhausted = block.timestamp + 86400;
-            if (players[msg.sender].xp > 0) players[msg.sender].xp.trySub(players[msg.sender].xp/10);
+            if (players[msg.sender].xp > 0)
+                players[msg.sender].xp.trySub(players[msg.sender].xp / 10);
             emit PlayerKilled();
         }
         _checkBoss(_bossId);
@@ -260,12 +273,13 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
     }
 
     function _checkBoss(uint256 _bossId) internal {
-         if (invaders[_bossId].hp == 0) {
+        if (invaders[_bossId].hp == 0) {
             invaders[_bossId].lastHit = msg.sender;
             invaders[_bossId].deadTimmer = block.timestamp + 432000;
             emit BossDefeated();
         }
     }
+
     /**
      * @notice Champions car revive other champions if you have the required intelligence (15)
      * If you died in battle and your exhausted time has passed (1 day) you can revive your self.
@@ -306,16 +320,17 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
     /**
      * @dev Only ADMIN role may call new bosses, the boss Id must be different from 0 and must be empty.
      * @notice Admins will spawm bosses across the land the stats and HP will depend on the input parameters.
-     * @param _bossId The boss id that will be loaded in to the mapping.
      * @param _level The level of the boss you want to create, the stats, hp and bounty of the boss are related to the level.
      */
-    function newInvadingBoss(uint256 _bossId, uint8 _level)
-        public
-        onlyRole(ADMIN)
-    {
-        require(_bossId > 0, "Boss Id must be different from 0");
-        require(invaders[_bossId].level == 0, "This boss Id already exist!");
-        uint16 bossStats = uint16(INITIAL_STAT_POINTS) + uint16(_level);
+    function newInvadingBoss(uint8 _level) public onlyRole(ADMIN) {
+        uint256 _bossId = _bossesIds.current();
+        if (_bossId > 10)
+            require(
+                invaders[_bossId - 10].hp == 0,
+                "Only 10 bosses may live at once"
+            );
+        _bossesIds.increment();
+        uint16 bossStats = uint16(INITIAL_STAT_POINTS) + uint16(_level * 4);
         invaders[_bossId].hp = _level * 100;
         invaders[_bossId].bounty = invaders[_bossId].hp * 10;
         (invaders[_bossId].str, invaders[_bossId].end) = _randomizeStats(
@@ -328,20 +343,19 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
      * @notice After defeating a boss you will be able to claim the corresponding rewards.
      * Such as Gold, Expirience and if the boss is +level 30 it will have a chance to drop a Medal to the last hitter.
      * The expirience claimed will come from the damage you made to the boss.
-     * @param _bossId The boss target that caller will claim rewards. 
+     * @param _bossId The boss target that caller will claim rewards.
      */
     function claimRewards(uint256 _bossId) private {
         require(invaders[_bossId].hp == 0, "This boss is still alive!");
         Character storage char = players[msg.sender];
         if (char.level < 255) {
-            uint256 newXp = uint256(char.xp).add(
-                invaders[_bossId].damage[msg.sender]
-            );
+            uint256 newXp = char.xp.add(invaders[_bossId].damage[msg.sender]);
             invaders[_bossId].damage[msg.sender] = 0;
             uint256 requiredXpToLevel = expirienceTable[char.level];
             while (newXp >= requiredXpToLevel) {
                 newXp = newXp - requiredXpToLevel;
                 char.level++;
+                statPoints[msg.sender] += 3;
                 emit LevelUp();
                 if (char.level < 255)
                     requiredXpToLevel = expirienceTable[char.level];
@@ -356,38 +370,82 @@ contract LordOfChain is AccessControl, ReentrancyGuard {
                         invaders[_bossId].damage[msg.sender] /
                         100)
                 ));
-        if (invaders[_bossId].lastHit == msg.sender && invaders[_bossId].level>=30){
+        if (
+            invaders[_bossId].lastHit == msg.sender &&
+            invaders[_bossId].level >= 30
+        ) {
             medal.awardItem(msg.sender);
             grantRole(LORD, msg.sender);
             emit NewLordInLands();
             emit MedalReceived();
-            }
+        }
     }
 
     /**
      * @dev Emits an event of all current alive bosses and their stats.
-     * TBD
+     * Only a maximun of 10 bosses may be alive at once.
      */
-    function invadersReport() public view{
+    function invadersReport() public {
+        uint256 _bossId = _bossesIds.current();
+        for (uint256 i = _bossId - 10; i < _bossId; i++) {
+            if (invaders[i].hp > 0)
+                emit BossReport(
+                    i,
+                    invaders[i].hp,
+                    invaders[i].bounty,
+                    invaders[i].level
+                );
+        }
+    }
 
+    /**
+     * @notice This function allows players to increase their stats after leveling up
+     * @param _stat 0 = str, 1 = end, 2 = inte. Only inputs allowed
+     * @param _points Input the quantity of points the player wants to assign to the stat and
+     * remove it from the statPoints mapping.
+     */
+    function spendStatPoints(uint8 _stat, uint256 _points)
+        public
+        onlyRole(CHAMPION)
+    {
+        require(
+            statPoints[msg.sender] >= _points,
+            "You dont have stats points to spend"
+        );
+        require(_stat == 0 || _stat == 1 || _stat == 2, "Invalid stat");
+        if (_stat == 0) {
+            statPoints[msg.sender] -= _points;
+            players[msg.sender].str += uint8(_points);
+        }
+        if (_stat == 1) {
+            statPoints[msg.sender] -= _points;
+            players[msg.sender].end += uint8(_points);
+        }
+        if (_stat == 2) {
+            statPoints[msg.sender] -= _points;
+            players[msg.sender].inte += uint8(_points);
+        }
     }
 
     /**
      * @dev Creates a New guild. Only the LORDS role can create a Guild and participate in SIEGES
      * TBD
      */
-    function createGuild () public payable onlyRole (LORD){
+    function createGuild() public payable onlyRole(LORD) {
         ///TBD
     }
 
     /**
      * @notice Once a boss has been defeated, the ADMINs can delete it from the mapping and use the id to a new boss
      * You will need to wait for 5 days after the boss has been defeated.
-     * @param _bossIndex The boss target that ADMIN will delete. After deleting the 
+     * @param _bossIndex The boss target that ADMIN will delete. After "deleting"
      */
     function deleteBoss(uint256 _bossIndex) public onlyRole(ADMIN) {
         require(invaders[_bossIndex].hp == 0, "This boss is still invading!");
-        require(invaders[_bossIndex].deadTimmer < block.timestamp,"Cant delete before 5 days");
+        require(
+            invaders[_bossIndex].deadTimmer < block.timestamp,
+            "Cant delete before 5 days"
+        );
         invaders[_bossIndex].level = 0;
     }
 
